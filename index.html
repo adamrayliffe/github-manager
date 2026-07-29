@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Github Backend Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
+    <style>
+        .monaco-editor { padding-top: 10px; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
+
+    <header class="bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center sticky top-0 z-50">
+        <div class="flex items-center gap-3">
+            <div class="bg-blue-600 p-2 rounded-lg"><i class="fa-solid fa-globe"></i></div>
+            <h1 class="font-bold text-lg">Github Repo Manager</h1>
+        </div>
+        <div id="auth-controls" class="flex gap-2">
+            <input type="password" id="github-token" placeholder="PAT Token..." class="bg-slate-950 border border-slate-700 px-3 py-1 rounded text-sm w-48">
+            <button onclick="connectGitHub()" class="bg-blue-600 px-4 py-1 rounded text-sm hover:bg-blue-500 font-semibold">Connect</button>
+        </div>
+        <div id="user-controls" class="hidden flex items-center gap-4">
+            <span id="user-login" class="text-sm text-slate-400"></span>
+            <button onclick="disconnect()" class="text-xs text-red-400 hover:text-red-300">Disconnect</button>
+        </div>
+    </header>
+
+    <main class="flex-grow p-6">
+        <div id="repo-view" class="max-w-7xl mx-auto space-y-6">
+            <div class="flex justify-between items-center">
+                <input type="text" id="search-input" oninput="filterRepos()" placeholder="Search repositories..." class="bg-slate-900 border border-slate-700 px-4 py-2 rounded-lg w-full md:w-96 text-sm">
+                <button onclick="fetchRepos()" class="bg-slate-800 px-4 py-2 rounded-lg text-sm hover:bg-slate-700"><i class="fa-solid fa-rotate-right mr-2"></i>Refresh</button>
+            </div>
+            <div id="repo-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+        </div>
+
+        <div id="ide-view" class="hidden h-[calc(100vh-100px)] flex flex-col gap-4">
+            <div class="flex items-center justify-between">
+                <button onclick="closeIDE()" class="text-blue-400 hover:text-blue-300"><i class="fa-solid fa-arrow-left mr-2"></i>Back to Dashboard</button>
+                <div id="file-meta" class="text-xs text-slate-500 font-mono"></div>
+            </div>
+            <div class="flex flex-grow border border-slate-800 rounded-xl overflow-hidden bg-slate-900">
+                <div id="file-explorer" class="w-64 border-r border-slate-800 p-4 overflow-y-auto text-sm bg-slate-950"></div>
+                <div class="flex-grow flex flex-col">
+                    <div id="editor" class="flex-grow"></div>
+                    <div class="p-4 border-t border-slate-800 flex items-center gap-3 bg-slate-900">
+                        <input type="text" id="commit-msg" placeholder="Commit message..." class="flex-grow bg-slate-950 border border-slate-700 px-3 py-2 rounded text-sm">
+                        <button id="save-btn" onclick="saveFile()" class="bg-emerald-600 hover:bg-emerald-500 px-6 py-2 rounded-lg text-sm font-bold text-white hidden">
+                            <i class="fa-solid fa-save mr-2"></i> Save Changes
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let token = sessionStorage.getItem('github_token') || "";
+        let allRepos = [];
+        let currentEditor = null;
+        let currentFile = null;
+
+        async function connectGitHub() {
+            token = document.getElementById('github-token').value;
+            sessionStorage.setItem('github_token', token);
+            await fetchRepos();
+        }
+
+        async function fetchRepos() {
+            if(!token) return;
+            const res = await fetch('https://api.github.com/user/repos?sort=updated', { headers: { Authorization: `Bearer ${token}` }});
+            allRepos = await res.json();
+            renderRepos(allRepos);
+            document.getElementById('auth-controls').classList.add('hidden');
+            document.getElementById('user-controls').classList.remove('hidden');
+        }
+
+        function renderRepos(repos) {
+            const container = document.getElementById('repo-grid');
+            container.innerHTML = repos.map(r => `
+                <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl hover:border-slate-700">
+                    <h3 class="font-bold mb-2 truncate">${r.name}</h3>
+                    <p class="text-xs text-slate-400 h-8 mb-4">${r.description || 'No description.'}</p>
+                    <button onclick="openIDE('${r.full_name}')" class="w-full bg-blue-600 hover:bg-blue-500 py-2 rounded text-sm font-bold">Edit Code</button>
+                </div>
+            `).join('');
+        }
+
+        async function openIDE(fullName) {
+            document.getElementById('repo-view').classList.add('hidden');
+            document.getElementById('ide-view').classList.remove('hidden');
+            const res = await fetch(`https://api.github.com/repos/${fullName}/contents`, { headers: { Authorization: `Bearer ${token}` }});
+            const files = await res.json();
+            const explorer = document.getElementById('file-explorer');
+            explorer.innerHTML = files.filter(f => f.type === 'file').map(f => `<div class="cursor-pointer hover:text-blue-400 py-1" onclick="loadFile('${fullName}', '${f.path}', '${f.url}')">${f.name}</div>`).join('');
+        }
+
+        async function loadFile(fullName, path, url) {
+            const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.v3.raw' }});
+            const content = await res.text();
+            
+            // Fetch SHA separately because raw content doesn't return it
+            const metaRes = await fetch(`https://api.github.com/repos/${fullName}/contents/${path}`, { headers: { Authorization: `Bearer ${token}` }});
+            const meta = await metaRes.json();
+            
+            currentFile = { fullName, path, sha: meta.sha };
+            
+            require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }});
+            require(['vs/editor/editor.main'], () => {
+                if(currentEditor) currentEditor.dispose();
+                currentEditor = monaco.editor.create(document.getElementById('editor'), { value: content, language: path.endsWith('.html') ? 'html' : 'javascript', theme: 'vs-dark' });
+                document.getElementById('save-btn').classList.remove('hidden');
+            });
+        }
+
+        async function saveFile() {
+            const content = currentEditor.getValue();
+            const message = document.getElementById('commit-msg').value || `Update ${currentFile.path}`;
+            const res = await fetch(`https://api.github.com/repos/${currentFile.fullName}/contents/${currentFile.path}`, {
+                method: 'PUT',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message, content: btoa(content), sha: currentFile.sha })
+            });
+            if(res.ok) {
+                const data = await res.json();
+                currentFile.sha = data.content.sha;
+                alert('Saved successfully!');
+            }
+        }
+
+        function closeIDE() {
+            document.getElementById('repo-view').classList.remove('hidden');
+            document.getElementById('ide-view').classList.add('hidden');
+            document.getElementById('save-btn').classList.add('hidden');
+        }
+
+        function disconnect() {
+            sessionStorage.removeItem('github_token');
+            location.reload();
+        }
+
+        function filterRepos() {
+            const q = document.getElementById('search-input').value.toLowerCase();
+            renderRepos(allRepos.filter(r => r.name.toLowerCase().includes(q)));
+        }
+        
+        // Auto-initialize if session found
+        if(token) fetchRepos();
+    </script>
+</body>
+</html>
