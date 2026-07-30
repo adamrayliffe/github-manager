@@ -72,10 +72,14 @@
         async function fetchRepos() {
             if(!token) return;
             const res = await fetch('https://api.github.com/user/repos?sort=updated', { headers: { Authorization: `Bearer ${token}` }});
-            allRepos = await res.json();
-            renderRepos(allRepos);
-            document.getElementById('auth-controls').classList.add('hidden');
-            document.getElementById('user-controls').classList.remove('hidden');
+            if(res.ok) {
+                allRepos = await res.json();
+                renderRepos(allRepos);
+                document.getElementById('auth-controls').classList.add('hidden');
+                document.getElementById('user-controls').classList.remove('hidden');
+            } else {
+                alert('Failed to authenticate with GitHub. Check your PAT token.');
+            }
         }
 
         function renderRepos(repos) {
@@ -95,18 +99,18 @@
             const res = await fetch(`https://api.github.com/repos/${fullName}/contents`, { headers: { Authorization: `Bearer ${token}` }});
             const files = await res.json();
             const explorer = document.getElementById('file-explorer');
-            explorer.innerHTML = files.filter(f => f.type === 'file').map(f => `<div class="cursor-pointer hover:text-blue-400 py-1" onclick="loadFile('${fullName}', '${f.path}', '${f.url}')">${f.name}</div>`).join('');
+            explorer.innerHTML = Array.isArray(files) ? files.filter(f => f.type === 'file').map(f => `<div class="cursor-pointer hover:text-blue-400 py-1 truncate" onclick="loadFile('${fullName}', '${f.path}', '${f.url}')">${f.name}</div>`).join('') : '<span class="text-xs text-red-400">Empty or inaccessible repository</span>';
         }
 
         async function loadFile(fullName, path, url) {
             const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.v3.raw' }});
             const content = await res.text();
             
-            // Fetch SHA separately because raw content doesn't return it
             const metaRes = await fetch(`https://api.github.com/repos/${fullName}/contents/${path}`, { headers: { Authorization: `Bearer ${token}` }});
             const meta = await metaRes.json();
             
             currentFile = { fullName, path, sha: meta.sha };
+            document.getElementById('file-meta').innerText = `${fullName} / ${path}`;
             
             require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }});
             require(['vs/editor/editor.main'], () => {
@@ -117,17 +121,41 @@
         }
 
         async function saveFile() {
+            if(!currentFile || !currentEditor) return;
+            
             const content = currentEditor.getValue();
             const message = document.getElementById('commit-msg').value || `Update ${currentFile.path}`;
+            
+            // Safely encode UTF-8 strings into Base64 to prevent btoa corruption errors
+            const utf8Bytes = new TextEncoder().encode(content);
+            let binaryString = '';
+            for (let i = 0; i < utf8Bytes.length; i++) {
+                binaryString += String.fromCharCode(utf8Bytes[i]);
+            }
+            const base64Content = btoa(binaryString);
+
             const res = await fetch(`https://api.github.com/repos/${currentFile.fullName}/contents/${currentFile.path}`, {
                 method: 'PUT',
-                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message, content: btoa(content), sha: currentFile.sha })
+                headers: { 
+                    Authorization: `Bearer ${token}`, 
+                    'Content-Type': 'application/json' 
+                },
+                body: JSON.stringify({ 
+                    message: message, 
+                    content: base64Content, 
+                    sha: currentFile.sha 
+                })
             });
+
             if(res.ok) {
                 const data = await res.json();
-                currentFile.sha = data.content.sha;
-                alert('Saved successfully!');
+                currentFile.sha = data.content.sha; // Update SHA for next consecutive save
+                document.getElementById('commit-msg').value = '';
+                alert('Changes saved and committed to GitHub successfully!');
+            } else {
+                const errData = await res.json();
+                alert('Failed to save: ' + (errData.message || 'Check console for details.'));
+                console.error(errData);
             }
         }
 
@@ -135,6 +163,7 @@
             document.getElementById('repo-view').classList.remove('hidden');
             document.getElementById('ide-view').classList.add('hidden');
             document.getElementById('save-btn').classList.add('hidden');
+            currentFile = null;
         }
 
         function disconnect() {
@@ -147,7 +176,6 @@
             renderRepos(allRepos.filter(r => r.name.toLowerCase().includes(q)));
         }
         
-        // Auto-initialize if session found
         if(token) fetchRepos();
     </script>
 </body>
