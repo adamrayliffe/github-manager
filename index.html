@@ -43,7 +43,10 @@
         <div id="ide-view" class="hidden h-[calc(100vh-100px)] flex flex-col gap-4">
             <div class="flex items-center justify-between">
                 <button onclick="closeIDE()" class="text-blue-400 hover:text-blue-300"><i class="fa-solid fa-arrow-left mr-2"></i>Back to Dashboard</button>
-                <div id="file-meta" class="text-xs text-slate-500 font-mono"></div>
+                <div class="flex items-center gap-4">
+                    <button onclick="promptNewFile()" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded text-xs font-bold transition"><i class="fa-solid fa-file-circle-plus mr-1"></i> New File</button>
+                    <div id="file-meta" class="text-xs text-slate-500 font-mono"></div>
+                </div>
             </div>
             <div class="flex flex-grow border border-slate-800 rounded-xl overflow-hidden bg-slate-900">
                 <div id="file-explorer" class="w-64 border-r border-slate-800 p-4 overflow-y-auto text-sm bg-slate-950"></div>
@@ -97,6 +100,7 @@
         let allRepos = [];
         let currentEditor = null;
         let currentFile = null;
+        let activeRepoFullName = "";
 
         async function connectGitHub() {
             token = document.getElementById('github-token').value;
@@ -173,9 +177,13 @@
             });
 
             if(res.ok) {
+                const newRepoData = await res.json();
                 closeCreateModal();
-                alert('Repository created successfully!');
-                await fetchRepos(); // Refresh grid to list the new repo
+                
+                allRepos.unshift(newRepoData);
+                renderRepos(allRepos);
+
+                alert('Repository created successfully! It is now available in your manager.');
             } else {
                 const err = await res.json();
                 alert('Failed to create repository: ' + (err.message || 'Unknown error'));
@@ -183,12 +191,50 @@
         }
 
         async function openIDE(fullName) {
+            activeRepoFullName = fullName;
             document.getElementById('repo-view').classList.add('hidden');
             document.getElementById('ide-view').classList.remove('hidden');
+            await loadFileExplorer(fullName);
+        }
+
+        async function loadFileExplorer(fullName) {
             const res = await fetch(`https://api.github.com/repos/${fullName}/contents`, { headers: { Authorization: `Bearer ${token}` }});
             const files = await res.json();
             const explorer = document.getElementById('file-explorer');
-            explorer.innerHTML = Array.isArray(files) ? files.filter(f => f.type === 'file').map(f => `<div class="cursor-pointer hover:text-blue-400 py-1 truncate" onclick="loadFile('${fullName}', '${f.path}', '${f.url}')">${f.name}</div>`).join('') : '<span class="text-xs text-slate-500">Empty repository (No files found)</span>';
+            
+            if(Array.isArray(files)) {
+                explorer.innerHTML = files.filter(f => f.type === 'file').map(f => `
+                    <div class="cursor-pointer hover:text-blue-400 py-1 truncate flex items-center justify-between group" onclick="loadFile('${fullName}', '${f.path}', '${f.url}')">
+                        <span><i class="fa-solid fa-file-code mr-2 text-slate-500"></i>${f.name}</span>
+                    </div>
+                `).join('');
+            } else {
+                explorer.innerHTML = '<span class="text-xs text-slate-500">Empty repository</span>';
+            }
+        }
+
+        function promptNewFile() {
+            const fileName = prompt("Enter new file path/name (e.g., index.html or pages/about.html):");
+            if(!fileName) return;
+
+            currentFile = {
+                fullName: activeRepoFullName,
+                path: fileName.trim(),
+                sha: null 
+            };
+
+            document.getElementById('file-meta').innerText = `${activeRepoFullName} / ${currentFile.path} (New File)`;
+
+            require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }});
+            require(['vs/editor/editor.main'], () => {
+                if(currentEditor) currentEditor.dispose();
+                currentEditor = monaco.editor.create(document.getElementById('editor'), { 
+                    value: "<!-- Write your new HTML content here -->\n", 
+                    language: currentFile.path.endsWith('.html') ? 'html' : 'javascript', 
+                    theme: 'vs-dark' 
+                });
+                document.getElementById('save-btn').classList.remove('hidden');
+            });
         }
 
         async function loadFile(fullName, path, url) {
@@ -222,17 +268,21 @@
             }
             const base64Content = btoa(binaryString);
 
+            const payload = { 
+                message: message, 
+                content: base64Content 
+            };
+            if(currentFile.sha) {
+                payload.sha = currentFile.sha;
+            }
+
             const res = await fetch(`https://api.github.com/repos/${currentFile.fullName}/contents/${currentFile.path}`, {
                 method: 'PUT',
                 headers: { 
                     Authorization: `Bearer ${token}`, 
                     'Content-Type': 'application/json' 
                 },
-                body: JSON.stringify({ 
-                    message: message, 
-                    content: base64Content, 
-                    sha: currentFile.sha 
-                })
+                body: JSON.stringify(payload)
             });
 
             if(res.ok) {
@@ -240,6 +290,7 @@
                 currentFile.sha = data.content.sha;
                 document.getElementById('commit-msg').value = '';
                 alert('Changes saved and committed to GitHub successfully!');
+                await loadFileExplorer(currentFile.fullName);
             } else {
                 const errData = await res.json();
                 alert('Failed to save: ' + (errData.message || 'Check console for details.'));
